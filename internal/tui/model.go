@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -26,6 +27,7 @@ type ViewMode int
 
 const (
 	ViewModeNormal ViewMode = iota
+	ViewModeSearch
 	ViewModeRevealMenu
 	ViewModeRevealConfirm
 	ViewModeRevealShow
@@ -69,6 +71,13 @@ type Model struct {
 	envVars   []k8s.EnvVar
 	envIdx    int
 	envCursor int
+
+	// Search state
+	searchInput        textinput.Model
+	searchPane         Pane
+	filteredNamespaces []int // indices into namespaces
+	filteredApps       []int // indices into apps
+	filteredEnvVars    []int // indices into envVars
 
 	// Reveal state
 	revealMode      RevealMode
@@ -129,6 +138,11 @@ func NewModel(client *k8s.Client) Model {
 	ti.CharLimit = 10
 	ti.Width = 20
 
+	si := textinput.New()
+	si.Placeholder = "Type to filter..."
+	si.CharLimit = 50
+	si.Width = 30
+
 	return Model{
 		client:        client,
 		resolver:      env.NewResolver(client),
@@ -136,6 +150,7 @@ func NewModel(client *k8s.Client) Model {
 		activePane:    PaneNamespaces,
 		viewMode:      ViewModeNormal,
 		revealInput:   ti,
+		searchInput:   si,
 		context:       client.GetCurrentContext(),
 	}
 }
@@ -300,6 +315,13 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Handle escape in special modes
 	if key.Matches(msg, m.keys.Back) || key.Matches(msg, m.keys.Cancel) {
 		switch m.viewMode {
+		case ViewModeSearch:
+			m.viewMode = ViewModeNormal
+			m.searchInput.Reset()
+			m.filteredNamespaces = nil
+			m.filteredApps = nil
+			m.filteredEnvVars = nil
+			return m, nil
 		case ViewModeRevealMenu, ViewModeRevealConfirm, ViewModeRevealShow:
 			m.viewMode = ViewModeNormal
 			m.revealInput.Reset()
@@ -319,6 +341,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.viewMode {
 	case ViewModeNormal:
 		return m.handleNormalMode(msg)
+	case ViewModeSearch:
+		return m.handleSearchMode(msg)
 	case ViewModeRevealMenu:
 		return m.handleRevealMenu(msg)
 	case ViewModeRevealConfirm:
@@ -371,6 +395,9 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Diff):
 		return m.handleDiffStart()
+
+	case key.Matches(msg, m.keys.Search):
+		return m.handleSearchStart()
 	}
 
 	return m, nil
@@ -597,6 +624,207 @@ func (m Model) handleDiffShow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// handleSearchStart starts the search mode
+func (m Model) handleSearchStart() (tea.Model, tea.Cmd) {
+	m.viewMode = ViewModeSearch
+	m.searchPane = m.activePane
+	m.searchInput.Reset()
+	m.searchInput.Focus()
+	m.updateFilter("")
+	return m, textinput.Blink
+}
+
+// handleSearchMode handles key press in search mode
+func (m Model) handleSearchMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		// Select current item and exit search
+		m.applySearchSelection()
+		m.viewMode = ViewModeNormal
+		m.searchInput.Reset()
+		// Load data based on pane
+		switch m.searchPane {
+		case PaneNamespaces:
+			m.loading = true
+			return m, m.loadApps()
+		case PaneApps:
+			m.loading = true
+			return m, m.loadEnvVars()
+		}
+		return m, nil
+
+	case tea.KeyUp, tea.KeyCtrlP:
+		m.searchMoveUp()
+		return m, nil
+
+	case tea.KeyDown, tea.KeyCtrlN:
+		m.searchMoveDown()
+		return m, nil
+
+	case tea.KeyCtrlC:
+		m.viewMode = ViewModeNormal
+		m.searchInput.Reset()
+		m.filteredNamespaces = nil
+		m.filteredApps = nil
+		m.filteredEnvVars = nil
+		return m, nil
+	}
+
+	// Handle text input
+	var cmd tea.Cmd
+	m.searchInput, cmd = m.searchInput.Update(msg)
+
+	// Update filter on every keystroke
+	m.updateFilter(m.searchInput.Value())
+
+	return m, cmd
+}
+
+// updateFilter updates the filtered indices based on search query
+func (m *Model) updateFilter(query string) {
+	query = strings.ToLower(query)
+
+	switch m.searchPane {
+	case PaneNamespaces:
+		m.filteredNamespaces = m.filterStrings(m.namespaces, query)
+		if len(m.filteredNamespaces) > 0 {
+			m.namespaceCursor = 0
+		}
+	case PaneApps:
+		m.filteredApps = nil
+		for i, app := range m.apps {
+			if query == "" || strings.Contains(strings.ToLower(app.Name), query) {
+				m.filteredApps = append(m.filteredApps, i)
+			}
+		}
+		if len(m.filteredApps) > 0 {
+			m.appCursor = 0
+		}
+	case PaneEnv:
+		m.filteredEnvVars = nil
+		for i, ev := range m.envVars {
+			if query == "" || strings.Contains(strings.ToLower(ev.Name), query) {
+				m.filteredEnvVars = append(m.filteredEnvVars, i)
+			}
+		}
+		if len(m.filteredEnvVars) > 0 {
+			m.envCursor = 0
+		}
+	}
+}
+
+// filterStrings returns indices of strings that match the query
+func (m *Model) filterStrings(items []string, query string) []int {
+	var result []int
+	for i, item := range items {
+		if query == "" || strings.Contains(strings.ToLower(item), query) {
+			result = append(result, i)
+		}
+	}
+	return result
+}
+
+// searchMoveUp moves cursor up in filtered list
+func (m *Model) searchMoveUp() {
+	switch m.searchPane {
+	case PaneNamespaces:
+		if m.namespaceCursor > 0 {
+			m.namespaceCursor--
+		}
+	case PaneApps:
+		if m.appCursor > 0 {
+			m.appCursor--
+		}
+	case PaneEnv:
+		if m.envCursor > 0 {
+			m.envCursor--
+		}
+	}
+}
+
+// searchMoveDown moves cursor down in filtered list
+func (m *Model) searchMoveDown() {
+	switch m.searchPane {
+	case PaneNamespaces:
+		if len(m.filteredNamespaces) > 0 && m.namespaceCursor < len(m.filteredNamespaces)-1 {
+			m.namespaceCursor++
+		}
+	case PaneApps:
+		if len(m.filteredApps) > 0 && m.appCursor < len(m.filteredApps)-1 {
+			m.appCursor++
+		}
+	case PaneEnv:
+		if len(m.filteredEnvVars) > 0 && m.envCursor < len(m.filteredEnvVars)-1 {
+			m.envCursor++
+		}
+	}
+}
+
+// applySearchSelection applies the current search selection
+func (m *Model) applySearchSelection() {
+	switch m.searchPane {
+	case PaneNamespaces:
+		if len(m.filteredNamespaces) > 0 && m.namespaceCursor < len(m.filteredNamespaces) {
+			m.namespaceIdx = m.filteredNamespaces[m.namespaceCursor]
+		}
+		m.filteredNamespaces = nil
+	case PaneApps:
+		if len(m.filteredApps) > 0 && m.appCursor < len(m.filteredApps) {
+			m.appIdx = m.filteredApps[m.appCursor]
+		}
+		m.filteredApps = nil
+	case PaneEnv:
+		if len(m.filteredEnvVars) > 0 && m.envCursor < len(m.filteredEnvVars) {
+			m.envIdx = m.filteredEnvVars[m.envCursor]
+		}
+		m.filteredEnvVars = nil
+	}
+}
+
+// GetFilteredNamespaces returns filtered namespace indices or all if not filtering
+func (m *Model) GetFilteredNamespaces() []int {
+	if m.viewMode == ViewModeSearch && m.searchPane == PaneNamespaces && m.filteredNamespaces != nil {
+		return m.filteredNamespaces
+	}
+	// Return all indices
+	result := make([]int, len(m.namespaces))
+	for i := range m.namespaces {
+		result[i] = i
+	}
+	return result
+}
+
+// GetFilteredApps returns filtered app indices or all if not filtering
+func (m *Model) GetFilteredApps() []int {
+	if m.viewMode == ViewModeSearch && m.searchPane == PaneApps && m.filteredApps != nil {
+		return m.filteredApps
+	}
+	// Return all indices
+	result := make([]int, len(m.apps))
+	for i := range m.apps {
+		result[i] = i
+	}
+	return result
+}
+
+// GetFilteredEnvVars returns filtered env var indices or all if not filtering
+func (m *Model) GetFilteredEnvVars() []int {
+	if m.viewMode == ViewModeSearch && m.searchPane == PaneEnv && m.filteredEnvVars != nil {
+		return m.filteredEnvVars
+	}
+	// Return all indices
+	result := make([]int, len(m.envVars))
+	for i := range m.envVars {
+		result[i] = i
+	}
+	return result
+}
+
+// IsSearchingPane returns true if currently searching in the given pane
+func (m *Model) IsSearchingPane(pane Pane) bool {
+	return m.viewMode == ViewModeSearch && m.searchPane == pane
 }
 
 // Custom errors

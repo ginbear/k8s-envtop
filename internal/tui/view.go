@@ -99,10 +99,20 @@ func (m Model) renderHeader() string {
 
 // renderHelp renders the help bar at the bottom
 func (m Model) renderHelp() string {
+	if m.viewMode == ViewModeSearch {
+		keys := []string{
+			helpKeyStyle.Render("Type") + helpStyle.Render(": filter"),
+			helpKeyStyle.Render("↑↓") + helpStyle.Render(": move"),
+			helpKeyStyle.Render("Enter") + helpStyle.Render(": select"),
+			helpKeyStyle.Render("Esc") + helpStyle.Render(": cancel"),
+		}
+		return helpStyle.Render(strings.Join(keys, "  "))
+	}
 	keys := []string{
 		helpKeyStyle.Render("Tab") + helpStyle.Render(": switch pane"),
 		helpKeyStyle.Render("↑↓") + helpStyle.Render(": move"),
 		helpKeyStyle.Render("Enter") + helpStyle.Render(": select"),
+		helpKeyStyle.Render("/") + helpStyle.Render(": search"),
 		helpKeyStyle.Render("r") + helpStyle.Render(": reveal"),
 		helpKeyStyle.Render("d") + helpStyle.Render(": diff"),
 		helpKeyStyle.Render("q") + helpStyle.Render(": quit"),
@@ -112,26 +122,39 @@ func (m Model) renderHelp() string {
 
 // renderNamespacesPane renders the namespaces pane
 func (m Model) renderNamespacesPane(width, height int) string {
-	style := GetPaneStyle(m.activePane == PaneNamespaces)
+	isSearching := m.IsSearchingPane(PaneNamespaces)
+	style := GetPaneStyle(m.activePane == PaneNamespaces || isSearching)
 	style = style.Width(width).Height(height)
 
 	title := titleStyle.Render("Namespaces")
 	content := []string{title}
 
+	// Show search input if searching this pane
+	if isSearching {
+		content = append(content, m.searchInput.View())
+	}
+
+	// Get filtered indices
+	filteredIndices := m.GetFilteredNamespaces()
+
 	maxItems := height - 3
+	if isSearching {
+		maxItems-- // Account for search input
+	}
 	startIdx := 0
 	if m.namespaceCursor >= maxItems {
 		startIdx = m.namespaceCursor - maxItems + 1
 	}
 
-	for i := startIdx; i < len(m.namespaces) && i < startIdx+maxItems; i++ {
+	for cursorPos := startIdx; cursorPos < len(filteredIndices) && cursorPos < startIdx+maxItems; cursorPos++ {
+		i := filteredIndices[cursorPos]
 		ns := m.namespaces[i]
 		prefix := "  "
-		itemStyle := itemStyle
+		style := itemStyle
 
-		if i == m.namespaceCursor {
+		if cursorPos == m.namespaceCursor {
 			prefix = "> "
-			itemStyle = selectedItemStyle
+			style = selectedItemStyle
 		}
 
 		// Mark selected namespace
@@ -145,37 +168,56 @@ func (m Model) renderNamespacesPane(width, height int) string {
 			ns = ns[:maxLen-3] + "..."
 		}
 
-		content = append(content, itemStyle.Render(prefix+ns))
+		content = append(content, style.Render(prefix+ns))
 	}
 
-	return style.Render(strings.Join(content, "\n"))
+	if len(filteredIndices) == 0 {
+		content = append(content, mutedStyle.Render("  No matches"))
+	}
+
+	return GetPaneStyle(m.activePane == PaneNamespaces || isSearching).Width(width).Height(height).Render(strings.Join(content, "\n"))
 }
 
 // renderAppsPane renders the apps pane
 func (m Model) renderAppsPane(width, height int) string {
-	style := GetPaneStyle(m.activePane == PaneApps)
+	isSearching := m.IsSearchingPane(PaneApps)
+	style := GetPaneStyle(m.activePane == PaneApps || isSearching)
 	style = style.Width(width).Height(height)
 
 	title := titleStyle.Render("Apps")
 	content := []string{title}
 
+	// Show search input if searching this pane
+	if isSearching {
+		content = append(content, m.searchInput.View())
+	}
+
+	// Get filtered indices
+	filteredIndices := m.GetFilteredApps()
+
 	if len(m.apps) == 0 {
 		content = append(content, mutedStyle.Render("  No apps found"))
+	} else if len(filteredIndices) == 0 {
+		content = append(content, mutedStyle.Render("  No matches"))
 	} else {
 		maxItems := height - 3
+		if isSearching {
+			maxItems--
+		}
 		startIdx := 0
 		if m.appCursor >= maxItems {
 			startIdx = m.appCursor - maxItems + 1
 		}
 
-		for i := startIdx; i < len(m.apps) && i < startIdx+maxItems; i++ {
+		for cursorPos := startIdx; cursorPos < len(filteredIndices) && cursorPos < startIdx+maxItems; cursorPos++ {
+			i := filteredIndices[cursorPos]
 			app := m.apps[i]
 			prefix := "  "
-			itemStyle := itemStyle
+			style := itemStyle
 
-			if i == m.appCursor {
+			if cursorPos == m.appCursor {
 				prefix = "> "
-				itemStyle = selectedItemStyle
+				style = selectedItemStyle
 			}
 
 			// Format: name (kind)
@@ -198,41 +240,56 @@ func (m Model) renderAppsPane(width, height int) string {
 				marker = " *"
 			}
 
-			content = append(content, itemStyle.Render(prefix+name+kindBadge+marker))
+			content = append(content, style.Render(prefix+name+kindBadge+marker))
 		}
 	}
 
-	return style.Render(strings.Join(content, "\n"))
+	return GetPaneStyle(m.activePane == PaneApps || isSearching).Width(width).Height(height).Render(strings.Join(content, "\n"))
 }
 
 // renderEnvPane renders the env pane
 func (m Model) renderEnvPane(width, height int) string {
-	style := GetPaneStyle(m.activePane == PaneEnv)
+	isSearching := m.IsSearchingPane(PaneEnv)
+	style := GetPaneStyle(m.activePane == PaneEnv || isSearching)
 	style = style.Width(width).Height(height)
 
 	title := titleStyle.Render("Environment Variables")
 	content := []string{title}
 
+	// Show search input if searching this pane
+	if isSearching {
+		content = append(content, m.searchInput.View())
+	}
+
 	// Header
 	header := fmt.Sprintf("%-20s %-15s %-12s %s", "NAME", "SOURCE", "KIND", "VALUE")
 	content = append(content, helpStyle.Render(header))
 
+	// Get filtered indices
+	filteredIndices := m.GetFilteredEnvVars()
+
 	if len(m.envVars) == 0 {
 		content = append(content, mutedStyle.Render("  No env vars found"))
+	} else if len(filteredIndices) == 0 {
+		content = append(content, mutedStyle.Render("  No matches"))
 	} else {
 		maxItems := height - 5
+		if isSearching {
+			maxItems--
+		}
 		startIdx := 0
 		if m.envCursor >= maxItems {
 			startIdx = m.envCursor - maxItems + 1
 		}
 
-		for i := startIdx; i < len(m.envVars) && i < startIdx+maxItems; i++ {
+		for cursorPos := startIdx; cursorPos < len(filteredIndices) && cursorPos < startIdx+maxItems; cursorPos++ {
+			i := filteredIndices[cursorPos]
 			ev := m.envVars[i]
-			content = append(content, m.renderEnvVarRow(ev, i == m.envCursor, width))
+			content = append(content, m.renderEnvVarRow(ev, cursorPos == m.envCursor, width))
 		}
 	}
 
-	return style.Render(strings.Join(content, "\n"))
+	return GetPaneStyle(m.activePane == PaneEnv || isSearching).Width(width).Height(height).Render(strings.Join(content, "\n"))
 }
 
 // renderEnvVarRow renders a single env var row
