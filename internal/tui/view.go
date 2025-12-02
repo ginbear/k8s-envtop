@@ -33,26 +33,11 @@ func (m Model) View() string {
 	return m.renderNormalView()
 }
 
-// renderNormalView renders the main 3-pane layout
+// renderNormalView renders the 2-row layout
+// Top row: [Namespaces] [Apps]
+// Bottom row: [Environment Variables]
 func (m Model) renderNormalView() string {
-	// Calculate pane widths
-	totalWidth := m.width - 4 // Account for borders
-	nsWidth := totalWidth / 5
-	appsWidth := totalWidth / 5
-	envWidth := totalWidth - nsWidth - appsWidth
-
-	// Calculate pane height
-	paneHeight := m.height - 6 // Account for header, help, and borders
-
-	// Render each pane
-	nsPane := m.renderNamespacesPane(nsWidth, paneHeight)
-	appsPane := m.renderAppsPane(appsWidth, paneHeight)
-	envPane := m.renderEnvPane(envWidth, paneHeight)
-
-	// Join panes horizontally
-	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, nsPane, appsPane, envPane)
-
-	// Render header
+	// Render header first
 	header := m.renderHeader()
 
 	// Render help
@@ -64,8 +49,44 @@ func (m Model) renderNormalView() string {
 		errorLine = errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
 	}
 
+	// Calculate available height for panes
+	// Total height minus: header(1) + help(1) + error(0-1) + padding(1)
+	usedHeight := 4
+	if errorLine != "" {
+		usedHeight++
+	}
+	availableHeight := m.height - usedHeight
+	if availableHeight < 10 {
+		availableHeight = 10
+	}
+
+	// Calculate dimensions
+	totalWidth := m.width - 4 // Account for borders
+
+	// Top row: NS and Apps split equally, use ~1/3 of available height
+	topRowWidth := totalWidth / 2
+	topRowHeight := availableHeight / 3
+	if topRowHeight < 5 {
+		topRowHeight = 5
+	}
+
+	// Bottom row: Env takes full width and remaining height
+	envWidth := totalWidth
+	envHeight := availableHeight - topRowHeight - 2 // -2 for spacing
+	if envHeight < 5 {
+		envHeight = 5
+	}
+
+	// Render top row panes
+	nsPane := m.renderNamespacesPane(topRowWidth-1, topRowHeight)
+	appsPane := m.renderAppsPane(topRowWidth-1, topRowHeight)
+	topRow := lipgloss.JoinHorizontal(lipgloss.Top, nsPane, appsPane)
+
+	// Render bottom row (env pane)
+	envPane := m.renderEnvPane(envWidth, envHeight)
+
 	// Join all parts vertically
-	parts := []string{header, mainContent, help}
+	parts := []string{header, topRow, envPane, help}
 	if errorLine != "" {
 		parts = append(parts, errorLine)
 	}
@@ -76,11 +97,11 @@ func (m Model) renderNormalView() string {
 // renderHeader renders the top header bar
 func (m Model) renderHeader() string {
 	title := titleStyle.Render("envtop")
-	ctx := statusBarStyle.Render(fmt.Sprintf("Context: %s", m.context))
+	ctx := fmt.Sprintf("Context: %s", m.context)
 
 	var status string
 	if m.loading {
-		status = statusBarStyle.Render("Loading...")
+		status = "Loading..."
 	} else if len(m.namespaces) > 0 {
 		ns := m.namespaces[m.namespaceIdx]
 		appName := ""
@@ -88,13 +109,13 @@ func (m Model) renderHeader() string {
 			appName = m.apps[m.appIdx].Name
 		}
 		if appName != "" {
-			status = statusBarStyle.Render(fmt.Sprintf("%s / %s", ns, appName))
+			status = fmt.Sprintf("| %s / %s", ns, appName)
 		} else {
-			status = statusBarStyle.Render(ns)
+			status = fmt.Sprintf("| %s", ns)
 		}
 	}
 
-	return lipgloss.JoinHorizontal(lipgloss.Center, title, "  ", ctx, "  ", status)
+	return fmt.Sprintf("%s  %s  %s", title, ctx, status)
 }
 
 // renderHelp renders the help bar at the bottom
@@ -262,7 +283,7 @@ func (m Model) renderEnvPane(width, height int) string {
 	}
 
 	// Header
-	header := fmt.Sprintf("%-20s %-15s %-12s %s", "NAME", "SOURCE", "KIND", "VALUE")
+	header := fmt.Sprintf("%-30s %-25s %-14s %s", "NAME", "SOURCE", "KIND", "VALUE")
 	content = append(content, helpStyle.Render(header))
 
 	// Get filtered indices
@@ -299,13 +320,13 @@ func (m Model) renderEnvVarRow(ev k8s.EnvVar, selected bool, width int) string {
 		prefix = "> "
 	}
 
-	// Name column
+	// Name column (max 28 chars)
 	name := ev.Name
-	if len(name) > 18 {
-		name = name[:15] + "..."
+	if len(name) > 28 {
+		name = name[:25] + "..."
 	}
 
-	// Source column
+	// Source column (max 23 chars)
 	source := ""
 	switch ev.SourceKind {
 	case k8s.EnvSourceConfigMap:
@@ -321,21 +342,21 @@ func (m Model) renderEnvVarRow(ev k8s.EnvVar, selected bool, width int) string {
 	default:
 		source = "(unknown)"
 	}
-	if len(source) > 13 {
-		source = source[:10] + "..."
+	if len(source) > 23 {
+		source = source[:20] + "..."
 	}
 
-	// Kind column
+	// Kind column (max 12 chars)
 	kind := string(ev.SourceKind)
-	if len(kind) > 10 {
-		kind = kind[:10]
+	if len(kind) > 12 {
+		kind = kind[:12]
 	}
 
-	// Value column
+	// Value column (use remaining width)
 	value := ev.Value
-	maxValueLen := width - 55
-	if maxValueLen < 10 {
-		maxValueLen = 10
+	maxValueLen := width - 75 // Adjusted for wider columns
+	if maxValueLen < 20 {
+		maxValueLen = 20
 	}
 	if len(value) > maxValueLen {
 		value = value[:maxValueLen-3] + "..."
@@ -351,7 +372,7 @@ func (m Model) renderEnvVarRow(ev k8s.EnvVar, selected bool, width int) string {
 	}
 
 	// Format the row
-	row := fmt.Sprintf("%-18s %-13s %-10s %s%s", name, source, kind, value, notes)
+	row := fmt.Sprintf("%-28s %-23s %-12s %s%s", name, source, kind, value, notes)
 
 	// Apply styling
 	style := itemStyle
@@ -362,9 +383,9 @@ func (m Model) renderEnvVarRow(ev k8s.EnvVar, selected bool, width int) string {
 	// Color the kind badge
 	kindStyle := GetSourceKindStyle(string(ev.SourceKind))
 	if ev.IsSecret() {
-		row = fmt.Sprintf("%-18s %-13s %s %s%s", name, source, kindStyle.Render(fmt.Sprintf("%-10s", kind)), envSecretStyle.Render(value), envHashStyle.Render(notes))
+		row = fmt.Sprintf("%-28s %-23s %s %s%s", name, source, kindStyle.Render(fmt.Sprintf("%-12s", kind)), envSecretStyle.Render(value), envHashStyle.Render(notes))
 	} else {
-		row = fmt.Sprintf("%-18s %-13s %s %s", name, source, kindStyle.Render(fmt.Sprintf("%-10s", kind)), envValueStyle.Render(value))
+		row = fmt.Sprintf("%-28s %-23s %s %s", name, source, kindStyle.Render(fmt.Sprintf("%-12s", kind)), envValueStyle.Render(value))
 	}
 
 	return style.Render(prefix + row)

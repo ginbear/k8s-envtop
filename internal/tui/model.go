@@ -312,16 +312,23 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	// Handle escape in special modes
-	if key.Matches(msg, m.keys.Back) || key.Matches(msg, m.keys.Cancel) {
-		switch m.viewMode {
-		case ViewModeSearch:
+	// Handle search mode first (before other key bindings interfere)
+	if m.viewMode == ViewModeSearch {
+		// Only Esc cancels search mode
+		if key.Matches(msg, m.keys.Back) {
 			m.viewMode = ViewModeNormal
 			m.searchInput.Reset()
 			m.filteredNamespaces = nil
 			m.filteredApps = nil
 			m.filteredEnvVars = nil
 			return m, nil
+		}
+		return m.handleSearchMode(msg)
+	}
+
+	// Handle escape in special modes
+	if key.Matches(msg, m.keys.Back) || key.Matches(msg, m.keys.Cancel) {
+		switch m.viewMode {
 		case ViewModeRevealMenu, ViewModeRevealConfirm, ViewModeRevealShow:
 			m.viewMode = ViewModeNormal
 			m.revealInput.Reset()
@@ -341,8 +348,6 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.viewMode {
 	case ViewModeNormal:
 		return m.handleNormalMode(msg)
-	case ViewModeSearch:
-		return m.handleSearchMode(msg)
 	case ViewModeRevealMenu:
 		return m.handleRevealMenu(msg)
 	case ViewModeRevealConfirm:
