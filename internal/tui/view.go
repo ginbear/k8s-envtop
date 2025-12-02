@@ -141,6 +141,7 @@ func (m Model) renderHelp() string {
 		helpKeyStyle.Render("Enter") + helpStyle.Render(": select"),
 		helpKeyStyle.Render("/") + helpStyle.Render(": search"),
 		helpKeyStyle.Render("r") + helpStyle.Render(": reveal"),
+		helpKeyStyle.Render("s") + helpStyle.Render(": seal"),
 		helpKeyStyle.Render("d") + helpStyle.Render(": diff"),
 		helpKeyStyle.Render("q") + helpStyle.Render(": quit"),
 	}
