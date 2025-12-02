@@ -15,6 +15,7 @@ type KeyMap struct {
 	Reveal   key.Binding
 	Diff     key.Binding
 	Search   key.Binding
+	Seal     key.Binding
 	Quit     key.Binding
 	Help     key.Binding
 	Confirm  key.Binding
@@ -68,6 +69,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("/"),
 			key.WithHelp("/", "search"),
 		),
+		Seal: key.NewBinding(
+			key.WithKeys("s"),
+			key.WithHelp("s", "seal value"),
+		),
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
 			key.WithHelp("q", "quit"),
@@ -89,7 +94,7 @@ func DefaultKeyMap() KeyMap {
 
 // ShortHelp returns the short help text
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Tab, k.Up, k.Down, k.Enter, k.Search, k.Reveal, k.Diff, k.Quit}
+	return []key.Binding{k.Tab, k.Up, k.Down, k.Enter, k.Search, k.Reveal, k.Seal, k.Diff, k.Quit}
 }
 
 // FullHelp returns the full help text
@@ -97,6 +102,6 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Left, k.Right},
 		{k.Tab, k.ShiftTab, k.Enter, k.Back},
-		{k.Search, k.Reveal, k.Diff, k.Quit},
+		{k.Search, k.Reveal, k.Seal, k.Diff, k.Quit},
 	}
 }

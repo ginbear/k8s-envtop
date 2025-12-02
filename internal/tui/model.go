@@ -2,7 +2,10 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -33,6 +36,8 @@ const (
 	ViewModeRevealShow
 	ViewModeDiffSelect
 	ViewModeDiffShow
+	ViewModeSealInput
+	ViewModeSealResult
 )
 
 // RevealMode represents how to display the revealed secret
@@ -86,6 +91,7 @@ type Model struct {
 	revealedValue   string
 	revealedEnvName string
 	revealExpiry    time.Time
+	revealCopied    bool
 
 	// Diff state
 	diffNamespaces []string
@@ -96,9 +102,19 @@ type Model struct {
 	diffAppName    string
 	diffCursor     int
 
+	// Seal state
+	sealSecretInput textinput.Model // Secret name input
+	sealValueInput  textinput.Model // Plain text value input
+	sealFocusField  int             // 0: secret name, 1: value
+	sealSecretName  string
+	sealResult      string
+	sealError       string
+	sealCopied      bool
+
 	// Error state
-	err     error
-	loading bool
+	err           error
+	loading       bool
+	statusMessage string
 
 	// Key bindings
 	keys KeyMap
@@ -125,10 +141,15 @@ type (
 		nsB     string
 		appName string
 	}
+	sealResultMsg struct {
+		result string
+		err    string
+	}
 	errorMsg struct {
 		err error
 	}
-	revealTimeoutMsg struct{}
+	revealTimeoutMsg  struct{}
+	clearStatusMsg    struct{}
 )
 
 // NewModel creates a new TUI model
@@ -143,15 +164,27 @@ func NewModel(client *k8s.Client) Model {
 	si.CharLimit = 50
 	si.Width = 30
 
+	sealSecretIn := textinput.New()
+	sealSecretIn.Placeholder = "Secret name..."
+	sealSecretIn.CharLimit = 253
+	sealSecretIn.Width = 40
+
+	sealValueIn := textinput.New()
+	sealValueIn.Placeholder = "Plain text value..."
+	sealValueIn.CharLimit = 500
+	sealValueIn.Width = 40
+
 	return Model{
-		client:        client,
-		resolver:      env.NewResolver(client),
-		keys:          DefaultKeyMap(),
-		activePane:    PaneNamespaces,
-		viewMode:      ViewModeNormal,
-		revealInput:   ti,
-		searchInput:   si,
-		context:       client.GetCurrentContext(),
+		client:          client,
+		resolver:        env.NewResolver(client),
+		keys:            DefaultKeyMap(),
+		activePane:      PaneNamespaces,
+		viewMode:        ViewModeNormal,
+		revealInput:     ti,
+		searchInput:     si,
+		sealSecretInput: sealSecretIn,
+		sealValueInput:  sealValueIn,
+		context:         client.GetCurrentContext(),
 	}
 }
 
@@ -291,6 +324,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewMode = ViewModeNormal
 		return m, nil
 
+	case sealResultMsg:
+		m.sealResult = msg.result
+		m.sealError = msg.err
+		m.viewMode = ViewModeSealResult
+		m.loading = false
+		return m, nil
+
+	case clearStatusMsg:
+		m.statusMessage = ""
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKeyPress(msg)
 	}
@@ -299,6 +343,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.viewMode == ViewModeRevealConfirm {
 		var cmd tea.Cmd
 		m.revealInput, cmd = m.revealInput.Update(msg)
+		return m, cmd
+	}
+
+	// Update text input if in seal input mode
+	if m.viewMode == ViewModeSealInput {
+		var cmd tea.Cmd
+		if m.sealFocusField == 0 {
+			m.sealSecretInput, cmd = m.sealSecretInput.Update(msg)
+		} else {
+			m.sealValueInput, cmd = m.sealValueInput.Update(msg)
+		}
 		return m, cmd
 	}
 
@@ -341,6 +396,16 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.viewMode = ViewModeNormal
 			m.diffResults = nil
 			return m, nil
+		case ViewModeSealInput:
+			m.viewMode = ViewModeNormal
+			m.sealSecretInput.Reset()
+			m.sealValueInput.Reset()
+			return m, nil
+		case ViewModeSealResult:
+			m.viewMode = ViewModeNormal
+			m.sealResult = ""
+			m.sealError = ""
+			return m, nil
 		}
 	}
 
@@ -358,6 +423,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleDiffSelect(msg)
 	case ViewModeDiffShow:
 		return m.handleDiffShow(msg)
+	case ViewModeSealInput:
+		return m.handleSealInput(msg)
+	case ViewModeSealResult:
+		return m.handleSealResult(msg)
 	}
 
 	return m, nil
@@ -403,6 +472,9 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Search):
 		return m.handleSearchStart()
+
+	case key.Matches(msg, m.keys.Seal):
+		return m.handleSealStart()
 	}
 
 	return m, nil
@@ -556,10 +628,22 @@ func (m Model) handleRevealConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleRevealShow handles key press in reveal show mode
 func (m Model) handleRevealShow(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Any key returns to normal mode
+	// Handle copy to clipboard
+	if msg.String() == "c" && m.revealedValue != "" && !m.revealCopied {
+		err := copyToClipboard(m.revealedValue)
+		if err != nil {
+			m.statusMessage = fmt.Sprintf("Copy failed: %v", err)
+			return m, m.clearStatusAfter(3 * time.Second)
+		}
+		m.revealCopied = true
+		return m, nil
+	}
+
+	// Any other key returns to normal mode
 	m.viewMode = ViewModeNormal
 	m.revealedValue = ""
 	m.revealedEnvName = ""
+	m.revealCopied = false
 	return m, nil
 }
 
@@ -830,6 +914,174 @@ func (m *Model) GetFilteredEnvVars() []int {
 // IsSearchingPane returns true if currently searching in the given pane
 func (m *Model) IsSearchingPane(pane Pane) bool {
 	return m.viewMode == ViewModeSearch && m.searchPane == pane
+}
+
+// handleSealStart starts the seal flow
+func (m Model) handleSealStart() (tea.Model, tea.Cmd) {
+	// Need a namespace selected
+	if len(m.namespaces) == 0 {
+		m.statusMessage = "No namespace selected"
+		return m, m.clearStatusAfter(2 * time.Second)
+	}
+
+	// Reset inputs
+	m.sealSecretInput.Reset()
+	m.sealValueInput.Reset()
+
+	// Try to pre-fill secret name if a Secret/SealedSecret is selected in Env pane
+	if m.activePane == PaneEnv && len(m.envVars) > 0 {
+		filteredIndices := m.GetFilteredEnvVars()
+		if m.envCursor < len(filteredIndices) {
+			envVar := m.envVars[filteredIndices[m.envCursor]]
+			if envVar.IsSecret() {
+				// Pre-fill secret name from selected env var
+				m.sealSecretInput.SetValue(envVar.SourceName)
+				m.sealFocusField = 1 // Focus on value input
+				m.sealSecretInput.Blur()
+				m.sealValueInput.Focus()
+				m.viewMode = ViewModeSealInput
+				return m, textinput.Blink
+			}
+		}
+	}
+
+	// No pre-fill, focus on secret name input
+	m.sealFocusField = 0
+	m.sealSecretInput.Focus()
+	m.sealValueInput.Blur()
+	m.viewMode = ViewModeSealInput
+	return m, textinput.Blink
+}
+
+// handleSealInput handles key press in seal input mode
+func (m Model) handleSealInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyTab, tea.KeyShiftTab:
+		// Toggle between fields
+		if m.sealFocusField == 0 {
+			m.sealFocusField = 1
+			m.sealSecretInput.Blur()
+			m.sealValueInput.Focus()
+		} else {
+			m.sealFocusField = 0
+			m.sealValueInput.Blur()
+			m.sealSecretInput.Focus()
+		}
+		return m, textinput.Blink
+
+	case tea.KeyEnter:
+		secretName := m.sealSecretInput.Value()
+		value := m.sealValueInput.Value()
+		if secretName == "" {
+			m.statusMessage = "Secret name is required"
+			return m, m.clearStatusAfter(2 * time.Second)
+		}
+		if value == "" {
+			m.statusMessage = "Value is required"
+			return m, m.clearStatusAfter(2 * time.Second)
+		}
+		m.sealSecretName = secretName
+		m.loading = true
+		return m, m.executeSeal(value)
+	}
+
+	// Handle text input for the focused field
+	var cmd tea.Cmd
+	if m.sealFocusField == 0 {
+		m.sealSecretInput, cmd = m.sealSecretInput.Update(msg)
+	} else {
+		m.sealValueInput, cmd = m.sealValueInput.Update(msg)
+	}
+	return m, cmd
+}
+
+// handleSealResult handles key press in seal result mode
+func (m Model) handleSealResult(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Ignore Enter key (might be leftover from input submission)
+	if msg.Type == tea.KeyEnter {
+		return m, nil
+	}
+
+	// Handle copy to clipboard
+	if msg.String() == "c" && m.sealResult != "" && !m.sealCopied {
+		err := copyToClipboard(m.sealResult)
+		if err != nil {
+			m.statusMessage = fmt.Sprintf("Copy failed: %v", err)
+			return m, m.clearStatusAfter(3 * time.Second)
+		}
+		m.sealCopied = true
+		return m, nil
+	}
+
+	// Any other key returns to normal mode
+	m.viewMode = ViewModeNormal
+	m.sealResult = ""
+	m.sealError = ""
+	m.sealCopied = false
+	return m, nil
+}
+
+// clearStatusAfter returns a command that clears the status message after a delay
+func (m Model) clearStatusAfter(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg {
+		return clearStatusMsg{}
+	})
+}
+
+// executeSeal runs kubeseal to encrypt the value
+func (m Model) executeSeal(plainText string) tea.Cmd {
+	namespace := m.namespaces[m.namespaceIdx]
+	secretName := m.sealSecretName
+
+	return func() tea.Msg {
+		result, err := runKubeseal(namespace, secretName, plainText)
+		if err != "" {
+			return sealResultMsg{result: "", err: err}
+		}
+		return sealResultMsg{result: result, err: ""}
+	}
+}
+
+// runKubeseal executes the kubeseal command
+func runKubeseal(namespace, secretName, plainText string) (string, string) {
+	cmd := exec.Command("kubeseal", "--raw", "--from-file=/dev/stdin", "--namespace", namespace, "--name", secretName)
+	cmd.Stdin = strings.NewReader(plainText)
+
+	output, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Sprintf("kubeseal error: %s", string(exitErr.Stderr))
+		}
+		return "", fmt.Sprintf("kubeseal error: %v", err)
+	}
+
+	return strings.TrimSpace(string(output)), ""
+}
+
+// copyToClipboard copies text to the system clipboard
+func copyToClipboard(text string) error {
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	case "linux":
+		// Try xclip first, then xsel
+		if _, err := exec.LookPath("xclip"); err == nil {
+			cmd = exec.Command("xclip", "-selection", "clipboard")
+		} else if _, err := exec.LookPath("xsel"); err == nil {
+			cmd = exec.Command("xsel", "--clipboard", "--input")
+		} else {
+			return fmt.Errorf("xclip or xsel not found")
+		}
+	case "windows":
+		cmd = exec.Command("clip")
+	default:
+		return fmt.Errorf("unsupported OS: %s", runtime.GOOS)
+	}
+
+	cmd.Stdin = strings.NewReader(text)
+	return cmd.Run()
 }
 
 // Custom errors

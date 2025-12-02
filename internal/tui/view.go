@@ -27,6 +27,10 @@ func (m Model) View() string {
 		return m.renderDiffSelect()
 	case ViewModeDiffShow:
 		return m.renderDiffView()
+	case ViewModeSealInput:
+		return m.renderSealInput()
+	case ViewModeSealResult:
+		return m.renderSealResult()
 	}
 
 	// Normal view with 3 panes
@@ -43,16 +47,18 @@ func (m Model) renderNormalView() string {
 	// Render help
 	help := m.renderHelp()
 
-	// Render error if any
-	errorLine := ""
+	// Render error or status message
+	statusLine := ""
 	if m.err != nil {
-		errorLine = errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
+		statusLine = errorStyle.Render(fmt.Sprintf("Error: %v", m.err))
+	} else if m.statusMessage != "" {
+		statusLine = warningStyle.Render(m.statusMessage)
 	}
 
 	// Calculate available height for panes
-	// Total height minus: header(1) + help(1) + error(0-1) + padding(1)
+	// Total height minus: header(1) + help(1) + status(0-1) + padding(1)
 	usedHeight := 4
-	if errorLine != "" {
+	if statusLine != "" {
 		usedHeight++
 	}
 	availableHeight := m.height - usedHeight
@@ -87,8 +93,8 @@ func (m Model) renderNormalView() string {
 
 	// Join all parts vertically
 	parts := []string{header, topRow, envPane, help}
-	if errorLine != "" {
-		parts = append(parts, errorLine)
+	if statusLine != "" {
+		parts = append(parts, statusLine)
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -455,11 +461,18 @@ func (m Model) renderRevealShow() string {
 
 	title := dialogTitleStyle.Render("Secret Value: " + m.revealedEnvName + " (" + modeLabel + ")")
 
+	// Show copied status
+	copyStatus := "c: copy to clipboard"
+	if m.revealCopied {
+		copyStatus = "✓ Copied to clipboard!"
+	}
+
 	content := []string{
 		title,
 		"",
 		envValueStyle.Render(m.revealedValue),
 		"",
+		helpStyle.Render(copyStatus),
 		warningStyle.Render("Press any key to close (auto-closes in 30s)"),
 	}
 
@@ -620,4 +633,88 @@ func (m Model) centerDialog(dialog string) string {
 	}
 
 	return verticalPadding + strings.Join(paddedLines, "\n")
+}
+
+// renderSealInput renders the seal input dialog
+func (m Model) renderSealInput() string {
+	dialog := dialogStyle.Width(70)
+
+	ns := m.namespaces[m.namespaceIdx]
+	title := dialogTitleStyle.Render("Seal Secret Value")
+
+	// Show focus indicator
+	secretLabel := "Secret name:"
+	valueLabel := "Plain text: "
+	if m.sealFocusField == 0 {
+		secretLabel = "▶ Secret name:"
+	} else {
+		valueLabel = "▶ Plain text: "
+	}
+
+	// Build command preview
+	secretName := m.sealSecretInput.Value()
+	if secretName == "" {
+		secretName = "<secret-name>"
+	}
+	cmdPreview := fmt.Sprintf("kubeseal --raw --from-file=/dev/stdin --namespace %s --name %s", ns, secretName)
+
+	content := []string{
+		title,
+		"",
+		dialogTextStyle.Render(fmt.Sprintf("Namespace: %s", ns)),
+		"",
+		dialogTextStyle.Render(secretLabel),
+		m.sealSecretInput.View(),
+		"",
+		dialogTextStyle.Render(valueLabel),
+		m.sealValueInput.View(),
+		"",
+		mutedStyle.Render("Command:"),
+		mutedStyle.Render(cmdPreview),
+		"",
+		helpStyle.Render("Tab: switch field  Enter: seal  Esc: cancel"),
+	}
+
+	return m.centerDialog(dialog.Render(strings.Join(content, "\n")))
+}
+
+// renderSealResult renders the seal result dialog
+func (m Model) renderSealResult() string {
+	dialog := dialogStyle.Width(80)
+
+	var content []string
+
+	if m.sealError != "" {
+		title := errorStyle.Render("Seal Error")
+		content = []string{
+			title,
+			"",
+			errorStyle.Render(m.sealError),
+			"",
+			helpStyle.Render("Press any key to close"),
+		}
+	} else {
+		title := dialogTitleStyle.Render("Sealed Value")
+		ns := m.namespaces[m.namespaceIdx]
+
+		// Show copied status
+		copyStatus := "c: copy to clipboard"
+		if m.sealCopied {
+			copyStatus = "✓ Copied to clipboard!"
+		}
+
+		content = []string{
+			title,
+			"",
+			dialogTextStyle.Render(fmt.Sprintf("Namespace: %s", ns)),
+			dialogTextStyle.Render(fmt.Sprintf("Secret: %s", m.sealSecretName)),
+			"",
+			envValueStyle.Render(m.sealResult),
+			"",
+			helpStyle.Render(copyStatus),
+			helpStyle.Render("Press any key to close"),
+		}
+	}
+
+	return m.centerDialog(dialog.Render(strings.Join(content, "\n")))
 }
