@@ -524,12 +524,14 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	case PaneNamespaces:
 		if m.namespaceCursor < len(m.namespaces) {
 			m.namespaceIdx = m.namespaceCursor
+			m.activePane = PaneApps // Move to Apps pane
 			m.loading = true
 			return m, m.loadApps()
 		}
 	case PaneApps:
 		if m.appCursor < len(m.apps) {
 			m.appIdx = m.appCursor
+			m.activePane = PaneEnv // Move to Env pane
 			m.loading = true
 			return m, m.loadEnvVars()
 		}
